@@ -30,6 +30,15 @@ jobs:
         env:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
 
+      - name: Register channels from channels.txt
+        run: |
+          while IFS= read -r channel || [ -n "$channel" ]; do
+            [[ -z "$channel" || "$channel" == \#* ]] && continue
+            uv run youtube-competitor-tracker add-channel "$channel"
+          done < channels.txt
+        env:
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+
       - name: Run scheduled sync
         run: uv run youtube-competitor-tracker scheduled-sync
         env:
