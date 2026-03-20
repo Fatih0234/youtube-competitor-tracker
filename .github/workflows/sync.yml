@@ -30,12 +30,11 @@ jobs:
         env:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
 
-      - name: Register channels from channels.txt
+      - name: Register channels from config.json
         run: |
-          while IFS= read -r channel || [ -n "$channel" ]; do
-            [[ -z "$channel" || "$channel" == \#* ]] && continue
+          jq -r '.channels[]' config.json | while IFS= read -r channel; do
             uv run youtube-competitor-tracker add-channel "$channel"
-          done < channels.txt
+          done
         env:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
 
