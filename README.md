@@ -46,9 +46,12 @@ uv run youtube-competitor-tracker list-videos --channel @YouTubeCreators
 - `add-channel <channel_reference>`
 - `sync-channel <channel_reference_or_channel_id>`
 - `sync-all`
+- `scheduled-sync` — scan new videos + refresh recent stats + update viral scores
 - `list-channels`
 - `show-channel <channel_reference_or_channel_id>`
 - `list-videos --channel <channel_reference_or_channel_id>`
+- `viral-scores` — print top videos ranked by viral score
+- `update-viral-scores` — recompute and persist viral scores for all recent videos (backfill / manual re-run)
 
 ## Current Scope
 
@@ -67,6 +70,41 @@ Out of scope for now:
 - transcripts, comments, or thumbnails
 - LLM enrichment
 - notifications or workflow automation beyond scheduling readiness
+
+## Viral Score
+
+Two fields are persisted on every `videos` row:
+
+| Field | Type | Description |
+|---|---|---|
+| `viral_score` | `FLOAT` | Score in roughly `[0, 1]` — how viral the video is at the time of scoring |
+| `viral_score_updated_at` | `DATETIME (tz)` | When the score was last computed |
+
+### How it is calculated
+
+Shorts and long-form videos are scored **in separate pools** so they don't compete against each other.
+
+Within each pool, five signals are computed per video:
+
+| Signal | Formula |
+|---|---|
+| `weighted_engagement` | `likes + 4 × comments` |
+| `quality` | `weighted_engagement / max(view_count, 1)` |
+| `reach` | `log1p(view_count)` |
+| `view_momentum` | views per hour over the last 12 h (falls back to 48 h window) |
+| `engagement_momentum` | weighted-engagement per hour over the same window |
+| `freshness` | `exp(-age_hours / 72)` — full weight when brand-new, near-zero after ~3 days |
+
+The four growth/quality signals are converted to **percentile ranks** `[0, 1]` within the pool. The final score is:
+
+```
+viral_score = freshness × (0.45 × view_momentum_rank
+                         + 0.25 × reach_rank
+                         + 0.20 × quality_rank
+                         + 0.10 × engagement_momentum_rank)
+```
+
+Scores are refreshed automatically on every `scheduled-sync` run and can be recomputed manually with `update-viral-scores`.
 
 ## Data Model
 

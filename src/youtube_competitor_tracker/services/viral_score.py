@@ -262,3 +262,36 @@ def rank_viral_videos(
     video_ids = [v.id for v in videos]
     snapshot_map = fetch_snapshot_map(session, video_ids, now=now)
     return compute_viral_scores(videos, snapshot_map, now)
+
+
+def save_viral_scores(
+    session: Session,
+    scored_videos: list[ScoredVideo],
+    now: datetime,
+) -> None:
+    """Write viral_score and viral_score_updated_at onto Video rows. Caller commits."""
+    if not scored_videos:
+        return
+
+    yt_ids = [sv.youtube_video_id for sv in scored_videos]
+    score_map = {sv.youtube_video_id: sv.viral_score for sv in scored_videos}
+
+    videos = list(session.scalars(select(Video).where(Video.youtube_video_id.in_(yt_ids))))
+    for video in videos:
+        video.viral_score = score_map[video.youtube_video_id]
+        video.viral_score_updated_at = now
+    session.flush()
+
+
+def rank_and_save_viral_videos(
+    session: Session,
+    *,
+    max_age_days: int = 14,
+    now: datetime | None = None,
+) -> list[ScoredVideo]:
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    scored = rank_viral_videos(session, max_age_days=max_age_days, now=now)
+    save_viral_scores(session, scored, now)
+    return scored

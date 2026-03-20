@@ -288,7 +288,12 @@ class SyncService:
             new_videos += self.scan_new_videos(channel)
 
         stats_updated = self.refresh_video_stats(since_days=metrics_window_days)
-        return {"new_videos": new_videos, "stats_updated": stats_updated}
+
+        from youtube_competitor_tracker.services.viral_score import rank_and_save_viral_videos
+        scored = rank_and_save_viral_videos(self.session)
+        self.session.commit()
+
+        return {"new_videos": new_videos, "stats_updated": stats_updated, "viral_scores_updated": len(scored)}
 
     def sync_all(self) -> list[ChannelSyncRun]:
         channels = list(

@@ -206,7 +206,8 @@ def scheduled_sync() -> None:
             )
             typer.echo(
                 f"Scheduled sync: new_videos={summary['new_videos']} "
-                f"stats_updated={summary['stats_updated']}"
+                f"stats_updated={summary['stats_updated']} "
+                f"viral_scores_updated={summary['viral_scores_updated']}"
             )
     except Exception as exc:
         handle_error(exc)
@@ -228,6 +229,23 @@ def run_scheduler() -> None:
             "Press Ctrl+C to stop."
         )
         start_scheduler()
+    except Exception as exc:
+        handle_error(exc)
+
+
+@app.command("update-viral-scores")
+def update_viral_scores() -> None:
+    """Compute and persist viral scores for all recent videos (backfill or manual re-run)."""
+
+    settings = build_settings()
+    configure_logging(settings.log_level)
+    try:
+        from youtube_competitor_tracker.services.viral_score import rank_and_save_viral_videos
+
+        with session_scope(build_session_factory(settings)) as session:
+            scored = rank_and_save_viral_videos(session)
+            session.commit()
+            typer.echo(f"Viral scores updated: {len(scored)} videos scored.")
     except Exception as exc:
         handle_error(exc)
 
