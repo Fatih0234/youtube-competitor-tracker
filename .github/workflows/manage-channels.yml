@@ -1,0 +1,69 @@
+name: Manage Channels
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "'add' or 'remove'"
+        required: true
+      handle:
+        description: "YouTube channel handle (with or without @)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  manage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Update config.json
+        run: |
+          python3 - <<'EOF'
+          import json, sys, re
+
+          action = "${{ inputs.action }}"
+          handle = "${{ inputs.handle }}"
+          if not handle.startswith("@"):
+              handle = "@" + handle
+
+          with open("config.json") as f:
+              config = json.load(f)
+
+          channels = config["channels"]
+          existing = [c.lstrip("@").lower() for c in channels]
+          key = handle.lstrip("@").lower()
+
+          if action == "add":
+              if key in existing:
+                  print(f"Already exists: {handle}")
+              else:
+                  channels.append(handle)
+                  print(f"Added {handle}")
+          elif action == "remove":
+              new_channels = [c for c in channels if c.lstrip("@").lower() != key]
+              if len(new_channels) == len(channels):
+                  print(f"Not found: {handle}")
+              else:
+                  config["channels"] = new_channels
+                  print(f"Removed {handle}")
+          else:
+              sys.exit(f"Unknown action: {action}")
+
+          config["channels"] = channels if action == "add" else new_channels if action == "remove" else channels
+
+          with open("config.json", "w") as f:
+              json.dump(config, f, indent=2)
+              f.write("\n")
+          EOF
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git diff --quiet config.json || (
+            git add config.json &&
+            git commit -m "chore: ${{ inputs.action }} ${{ inputs.handle }} via bot [skip ci]" &&
+            git push
+          )
