@@ -34,6 +34,9 @@ class Settings(BaseSettings):
         default=1.0,
         alias="HTTP_RETRY_BACKOFF_SECONDS",
     )
+    backfill_days: int = Field(default=7, alias="BACKFILL_DAYS")
+    metrics_window_days: int = Field(default=3, alias="METRICS_WINDOW_DAYS")
+    scheduler_interval_hours: int = Field(default=3, alias="SCHEDULER_INTERVAL_HOURS")
 
     @field_validator("database_url")
     @classmethod

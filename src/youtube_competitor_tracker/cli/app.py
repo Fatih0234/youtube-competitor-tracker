@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Iterable
 
 import typer
+from sqlalchemy import func, select
 
 from youtube_competitor_tracker.config import Settings, get_settings
 from youtube_competitor_tracker.db.migrations import upgrade_database
@@ -12,6 +14,7 @@ from youtube_competitor_tracker.logging import configure_logging
 from youtube_competitor_tracker.models import Channel, Video
 from youtube_competitor_tracker.services.channels import ChannelService
 from youtube_competitor_tracker.sync.service import SyncService
+from youtube_competitor_tracker.utils.datetime import utc_now
 from youtube_competitor_tracker.youtube.client import YouTubeClient
 
 app = typer.Typer(help="Developer-oriented CLI for YouTube channel/video ingestion.")
@@ -70,16 +73,31 @@ def init_db() -> None:
 
 @app.command("add-channel")
 def add_channel(channel_reference: str) -> None:
-    """Resolve and store a tracked channel."""
+    """Resolve and store a tracked channel, then backfill recent uploads."""
 
     settings = build_settings()
     configure_logging(settings.log_level)
     youtube_client = build_youtube_client(settings)
     try:
         with session_scope(build_session_factory(settings)) as session:
-            service = ChannelService(session, youtube_client)
-            channel = service.add_channel(channel_reference)
+            channel_service = ChannelService(session, youtube_client)
+            channel = channel_service.add_channel(channel_reference)
             typer.echo(f"Tracked channel {channel.title} ({channel.youtube_channel_id})")
+
+            cutoff = utc_now() - timedelta(days=settings.backfill_days)
+            recent_count = session.scalar(
+                select(func.count(Video.id)).where(
+                    Video.channel_id == channel.id,
+                    Video.published_at >= cutoff,
+                )
+            )
+            if recent_count and recent_count > 0:
+                typer.echo("Skipping backfill: recent history already exists.")
+            else:
+                typer.echo(f"Starting backfill for last {settings.backfill_days} days...")
+                sync_service = SyncService(session, youtube_client)
+                run = sync_service.backfill_channel(channel, days=settings.backfill_days)
+                typer.echo(f"Backfill complete: inserted={run.videos_inserted} videos.")
     except Exception as exc:
         handle_error(exc)
     finally:
@@ -169,6 +187,47 @@ def list_videos(channel: str = typer.Option(..., "--channel", help="Tracked chan
         with session_scope(build_session_factory(settings)) as session:
             videos = ChannelService(session).list_videos_for_channel(channel)
             render_videos(videos)
+    except Exception as exc:
+        handle_error(exc)
+
+
+@app.command("scheduled-sync")
+def scheduled_sync() -> None:
+    """Run the scheduled sync once: scan new videos + refresh recent stats."""
+
+    settings = build_settings()
+    configure_logging(settings.log_level)
+    youtube_client = build_youtube_client(settings)
+    try:
+        with session_scope(build_session_factory(settings)) as session:
+            service = SyncService(session, youtube_client)
+            summary = service.scheduled_sync_all(
+                metrics_window_days=settings.metrics_window_days
+            )
+            typer.echo(
+                f"Scheduled sync: new_videos={summary['new_videos']} "
+                f"stats_updated={summary['stats_updated']}"
+            )
+    except Exception as exc:
+        handle_error(exc)
+    finally:
+        youtube_client.close()
+
+
+@app.command("run-scheduler")
+def run_scheduler() -> None:
+    """Start the APScheduler daemon for periodic sync (runs every SCHEDULER_INTERVAL_HOURS hours)."""
+
+    settings = build_settings()
+    configure_logging(settings.log_level)
+    try:
+        from youtube_competitor_tracker.scheduler import start_scheduler
+
+        typer.echo(
+            f"Starting scheduler (interval={settings.scheduler_interval_hours}h). "
+            "Press Ctrl+C to stop."
+        )
+        start_scheduler()
     except Exception as exc:
         handle_error(exc)
 

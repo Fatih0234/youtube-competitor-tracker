@@ -1,0 +1,41 @@
+name: Scheduled sync
+
+on:
+  schedule:
+    - cron: "0 */3 * * *" # every 3 hours
+  workflow_dispatch: # allow manual trigger
+
+permissions:
+  contents: write # needed to upload release assets
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Download database from release
+        run: gh release download data --pattern "*.db" --dir data/ || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Apply migrations
+        run: uv run youtube-competitor-tracker init-db
+        env:
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+
+      - name: Run scheduled sync
+        run: uv run youtube-competitor-tracker scheduled-sync
+        env:
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+
+      - name: Upload updated database to release
+        run: gh release upload data data/youtube_competitor_tracker.db --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

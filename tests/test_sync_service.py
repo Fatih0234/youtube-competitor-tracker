@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import func, select
@@ -108,10 +109,21 @@ class FakeYouTubeClient:
     def fetch_channel(self, channel_id: str, *, fallback_handle: str | None = None) -> YouTubeChannelResource:
         return replace(self.channel_resource, handle=fallback_handle or self.channel_resource.handle)
 
-    def list_upload_video_ids(self, uploads_playlist_id: str) -> list[str]:
+    def list_upload_video_ids(
+        self,
+        uploads_playlist_id: str,
+        *,
+        since: datetime | None = None,
+        page_limit: int | None = None,
+    ) -> list[str]:
         if self.fail_on_playlist:
             raise YouTubeAPIError("playlist failure")
-        return [video.youtube_video_id for video in self.video_resources]
+        ids = []
+        for video in self.video_resources:
+            if since is not None and video.published_at is not None and video.published_at < since:
+                break  # Playlist is reverse-chron; stop when we hit an old video
+            ids.append(video.youtube_video_id)
+        return ids
 
     def fetch_videos(self, video_ids: list[str]) -> list[YouTubeVideoResource]:
         resources = [video for video in self.video_resources if video.youtube_video_id in video_ids]
@@ -201,3 +213,154 @@ def test_failed_sync_marks_run_failed(session_factory) -> None:
         assert run is not None
         assert run.status == SyncRunStatus.FAILED
         assert "playlist failure" in (run.error_message or "")
+
+
+def test_backfill_channel_only_fetches_recent_videos(session_factory) -> None:
+    now = datetime.now(tz=timezone.utc)
+    recent_date = now - timedelta(days=3)
+    old_date = now - timedelta(days=10)
+
+    client = FakeYouTubeClient()
+    # video_resources[0] is first in playlist (recent), video_resources[1] is second (old)
+    client.video_resources[0] = replace(client.video_resources[0], published_at=recent_date)
+    client.video_resources[1] = replace(client.video_resources[1], published_at=old_date)
+
+    with session_factory() as session:
+        ChannelService(session, client).add_channel("@example")
+
+    with session_factory() as session:
+        channel = ChannelService(session).get_required_channel("@example")
+        run = SyncService(session, client).backfill_channel(channel, days=7)
+        assert run.status == SyncRunStatus.SUCCEEDED
+        assert run.videos_inserted == 1
+
+    with session_factory() as session:
+        assert session.scalar(select(func.count(Video.id))) == 1
+        video = session.scalar(select(Video))
+        assert video is not None
+        assert video.youtube_video_id == "video-1"
+
+
+def test_backfill_skipped_when_recent_history_exists(session_factory) -> None:
+    now = datetime.now(tz=timezone.utc)
+    client = FakeYouTubeClient()
+    backfill_called = []
+
+    with session_factory() as session:
+        channel = ChannelService(session, client).add_channel("@example")
+        video = Video(
+            youtube_video_id="existing-video",
+            channel_id=channel.id,
+            title="Existing Video",
+            published_at=now - timedelta(days=1),
+        )
+        session.add(video)
+        session.commit()
+
+    with session_factory() as session:
+        channel = ChannelService(session).get_required_channel("@example")
+        cutoff = now - timedelta(days=7)
+        recent_count = session.scalar(
+            select(func.count(Video.id)).where(
+                Video.channel_id == channel.id,
+                Video.published_at >= cutoff,
+            )
+        )
+        if not recent_count:
+            SyncService(session, client).backfill_channel(channel)
+            backfill_called.append(True)
+
+    assert not backfill_called
+
+    with session_factory() as session:
+        assert session.scalar(select(func.count(Video.id))) == 1
+
+
+def test_scan_new_videos_inserts_only_unknowns(session_factory) -> None:
+    client = FakeYouTubeClient()
+
+    with session_factory() as session:
+        channel = ChannelService(session, client).add_channel("@example")
+        # Pre-insert video-1 so it looks already synced
+        video = Video(
+            youtube_video_id="video-1",
+            channel_id=channel.id,
+            title="Video One",
+        )
+        session.add(video)
+        session.commit()
+
+    with session_factory() as session:
+        channel = ChannelService(session).get_required_channel("@example")
+        inserted = SyncService(session, client).scan_new_videos(channel)
+        assert inserted == 1  # Only video-2 is new
+
+    with session_factory() as session:
+        assert session.scalar(select(func.count(Video.id))) == 2
+        video_ids = set(session.scalars(select(Video.youtube_video_id)))
+        assert video_ids == {"video-1", "video-2"}
+
+
+def test_refresh_video_stats_updates_stats_only(session_factory) -> None:
+    now = datetime.now(tz=timezone.utc)
+    client = FakeYouTubeClient()
+    client.video_resources[0] = replace(client.video_resources[0], published_at=now - timedelta(days=1))
+    client.video_resources[1] = replace(client.video_resources[1], published_at=now - timedelta(days=2))
+
+    with session_factory() as session:
+        ChannelService(session, client).add_channel("@example")
+
+    with session_factory() as session:
+        channel = ChannelService(session).get_required_channel("@example")
+        SyncService(session, client).backfill_channel(channel, days=7)
+
+    # Update view counts in fake client
+    client.video_resources[0] = replace(client.video_resources[0], view_count=999)
+    client.video_resources[1] = replace(client.video_resources[1], view_count=888)
+
+    with session_factory() as session:
+        updated = SyncService(session, client).refresh_video_stats(since_days=3)
+        assert updated == 2
+
+    with session_factory() as session:
+        # No new canonical Video rows
+        assert session.scalar(select(func.count(Video.id))) == 2
+        v1 = session.scalar(select(Video).where(Video.youtube_video_id == "video-1"))
+        v2 = session.scalar(select(Video).where(Video.youtube_video_id == "video-2"))
+        assert v1 is not None and v1.view_count == 999
+        assert v2 is not None and v2.view_count == 888
+        # New snapshots created (sync_run_id=None)
+        assert session.scalar(select(func.count(VideoStatsSnapshot.id))) >= 2
+
+
+def test_refresh_video_stats_ignores_old_videos(session_factory) -> None:
+    now = datetime.now(tz=timezone.utc)
+    client = FakeYouTubeClient()
+    client.video_resources[0] = replace(client.video_resources[0], published_at=now - timedelta(days=1))
+    client.video_resources[1] = replace(client.video_resources[1], published_at=now - timedelta(days=10))
+
+    with session_factory() as session:
+        channel = ChannelService(session, client).add_channel("@example")
+        # Insert both videos directly with the given published_at values
+        for res in client.video_resources:
+            session.add(
+                Video(
+                    youtube_video_id=res.youtube_video_id,
+                    channel_id=channel.id,
+                    title=res.title,
+                    published_at=res.published_at,
+                    view_count=res.view_count,
+                )
+            )
+        session.commit()
+
+    # Only video-1 (1 day old) should be within the 3-day window
+    with session_factory() as session:
+        updated = SyncService(session, client).refresh_video_stats(since_days=3)
+        assert updated == 1
+
+    with session_factory() as session:
+        v1 = session.scalar(select(Video).where(Video.youtube_video_id == "video-1"))
+        v2 = session.scalar(select(Video).where(Video.youtube_video_id == "video-2"))
+        assert v1 is not None and v1.last_synced_at is not None
+        assert v2 is not None and v2.last_synced_at is None

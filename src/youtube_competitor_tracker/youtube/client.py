@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -106,9 +107,16 @@ class YouTubeClient:
             raise ChannelNotFoundError(f"No channel found for id {channel_id}.")
         return self._parse_channel_item(items[0], fallback_handle=fallback_handle)
 
-    def list_upload_video_ids(self, uploads_playlist_id: str) -> list[str]:
+    def list_upload_video_ids(
+        self,
+        uploads_playlist_id: str,
+        *,
+        since: datetime | None = None,
+        page_limit: int | None = None,
+    ) -> list[str]:
         video_ids: list[str] = []
         next_page_token: str | None = None
+        pages_fetched = 0
 
         while True:
             payload = self._request_json(
@@ -120,12 +128,25 @@ class YouTubeClient:
                     "pageToken": next_page_token,
                 },
             )
+            stop_early = False
             for item in payload.get("items", []):
-                video_id = item.get("contentDetails", {}).get("videoId")
-                if video_id:
-                    video_ids.append(video_id)
+                content_details = item.get("contentDetails", {})
+                video_id = content_details.get("videoId")
+                if not video_id:
+                    continue
+                if since is not None:
+                    published_at = parse_rfc3339(content_details.get("videoPublishedAt"))
+                    if published_at is not None and published_at < since:
+                        stop_early = True
+                        break
+                video_ids.append(video_id)
+
+            pages_fetched += 1
             next_page_token = payload.get("nextPageToken")
-            if not next_page_token:
+
+            if stop_early or not next_page_token:
+                return video_ids
+            if page_limit is not None and pages_fetched >= page_limit:
                 return video_ids
 
     def fetch_videos(self, video_ids: list[str]) -> list[YouTubeVideoResource]:
