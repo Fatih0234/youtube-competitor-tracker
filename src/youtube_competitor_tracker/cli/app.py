@@ -232,5 +232,34 @@ def run_scheduler() -> None:
         handle_error(exc)
 
 
+@app.command("viral-scores")
+def viral_scores(
+    limit: int = typer.Option(20, "--limit", help="Maximum number of results to show."),
+    shorts_only: bool = typer.Option(False, "--shorts", help="Show Shorts only."),
+    long_form_only: bool = typer.Option(False, "--long-form", help="Show long-form videos only."),
+) -> None:
+    """Rank videos by viral score (freshness × blended momentum/reach/quality)."""
+
+    settings = build_settings()
+    configure_logging(settings.log_level)
+    try:
+        from youtube_competitor_tracker.services.viral_score import rank_viral_videos
+
+        with session_scope(build_session_factory(settings)) as session:
+            scored = rank_viral_videos(session)
+            if shorts_only:
+                scored = [s for s in scored if s.is_short]
+            elif long_form_only:
+                scored = [s for s in scored if not s.is_short]
+            for sv in scored[:limit]:
+                typer.echo(
+                    f"{sv.viral_score:.4f}\t{sv.youtube_video_id}\t"
+                    f"{'short' if sv.is_short else 'long'}\t"
+                    f"{sv.view_count}\t{sv.channel_title}\t{sv.title}"
+                )
+    except Exception as exc:
+        handle_error(exc)
+
+
 def main() -> None:
     app()
